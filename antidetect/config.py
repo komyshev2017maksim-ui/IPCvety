@@ -15,7 +15,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 REPO_DIR = PACKAGE_DIR.parent
 
 DEFAULT_SETTINGS = {
-    # "auto": установленный Google Chrome, если есть, иначе Chromium из Playwright.
+    # "auto": установленный Google Chrome, иначе Microsoft Edge, иначе Chromium.
     # Можно указать "chrome", "msedge", "chromium" или полный путь к exe.
     "browser": "auto",
     # Страна, в которой должен выходить прокси. Профиль не откроется,
@@ -36,11 +36,6 @@ def home() -> Path:
     path = Path(raw).expanduser() if raw else REPO_DIR / "data"
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def use_local_browser_cache() -> None:
-    """Chromium из Playwright скачивается в папку данных, а не на диск C."""
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(home() / "pw-browsers"))
 
 
 def profiles_file() -> Path:

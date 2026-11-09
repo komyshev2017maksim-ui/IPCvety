@@ -1,8 +1,12 @@
-// Подмена отпечатка. Выполняется в каждой странице и фрейме до скриптов сайта.
-// __FINGERPRINT__ заменяется на JSON профиля (см. fingerprint.py).
+// Подмена отпечатка. Выполняется до скриптов сайта в каждой странице, фрейме
+// и воркере. __FINGERPRINT__ заменяется на JSON профиля (см. fingerprint.py).
+// Пояс, язык, размер экрана и число ядер подменяет сам движок (launcher.py),
+// здесь только то, для чего у движка нет настройки.
 (() => {
   'use strict';
   const FP = __FINGERPRINT__;
+  const scope = typeof globalThis !== 'undefined' ? globalThis : self;
+  const inPage = typeof document !== 'undefined';
 
   // --- Подменённые функции должны выглядеть как встроенные -------------------
   const nativeToString = Function.prototype.toString;
@@ -19,7 +23,8 @@
     value: toStringProxy,
   });
 
-  const wrapMethod = (proto, name, handler) => {
+  const wrapMethod = (owner, name, handler) => {
+    const proto = owner && owner.prototype;
     const desc = proto && Object.getOwnPropertyDescriptor(proto, name);
     if (!desc || typeof desc.value !== 'function') return;
     const original = desc.value;
@@ -32,7 +37,8 @@
     Object.defineProperty(proto, name, { ...desc, value: proxy });
   };
 
-  const wrapGetter = (proto, name, getValue) => {
+  const wrapGetter = (owner, name, getValue) => {
+    const proto = owner && owner.prototype;
     const desc = proto && Object.getOwnPropertyDescriptor(proto, name);
     if (!desc || typeof desc.get !== 'function') return;
     const original = desc.get;
@@ -57,121 +63,118 @@
     return (h ^ (h >>> 15)) >>> 0;
   };
 
-  // --- Железо и языки ---------------------------------------------------------
-  if (typeof Navigator !== 'undefined') {
-    if (FP.hardwareConcurrency) wrapGetter(Navigator.prototype, 'hardwareConcurrency', () => FP.hardwareConcurrency);
-    if (FP.deviceMemory) wrapGetter(Navigator.prototype, 'deviceMemory', () => FP.deviceMemory);
-    if (Array.isArray(FP.languages) && FP.languages.length) {
-      const languages = Object.freeze([...FP.languages]);
-      wrapGetter(Navigator.prototype, 'languages', () => languages);
-      wrapGetter(Navigator.prototype, 'language', () => languages[0]);
-    }
+  // --- Память устройства (в странице и в воркере одинаково) ------------------
+  if (FP.deviceMemory) {
+    wrapGetter(scope.Navigator, 'deviceMemory', () => FP.deviceMemory);
+    wrapGetter(scope.WorkerNavigator, 'deviceMemory', () => FP.deviceMemory);
   }
 
-  // --- Экран: размер задаёт движок (эмуляция Playwright), здесь рабочая область
-  if (FP.screen && typeof Screen !== 'undefined') {
-    wrapGetter(Screen.prototype, 'availWidth', () => FP.screen.availWidth);
-    wrapGetter(Screen.prototype, 'availHeight', () => FP.screen.availHeight);
-    wrapGetter(Screen.prototype, 'availLeft', () => 0);
-    wrapGetter(Screen.prototype, 'availTop', () => 0);
-    wrapGetter(Screen.prototype, 'colorDepth', () => FP.screen.colorDepth);
-    wrapGetter(Screen.prototype, 'pixelDepth', () => FP.screen.colorDepth);
+  // --- Рабочая область экрана: экран без панели задач ------------------------
+  if (FP.screen && scope.Screen) {
+    wrapGetter(scope.Screen, 'availWidth', () => FP.screen.availWidth);
+    wrapGetter(scope.Screen, 'availHeight', () => FP.screen.availHeight);
+    wrapGetter(scope.Screen, 'availLeft', () => 0);
+    wrapGetter(scope.Screen, 'availTop', () => 0);
   }
 
   // --- WebGL: производитель и модель видеокарты -------------------------------
   if (FP.webgl) {
     const UNMASKED_VENDOR = 0x9245;
     const UNMASKED_RENDERER = 0x9246;
-    const patchGetParameter = (proto) =>
-      wrapMethod(proto, 'getParameter', (target, self, args) => {
+    for (const owner of [scope.WebGLRenderingContext, scope.WebGL2RenderingContext]) {
+      wrapMethod(owner, 'getParameter', (target, self, args) => {
         const value = Reflect.apply(target, self, args);
         if (value === null) return value; // расширение не запрошено или контекст потерян
         if (args[0] === UNMASKED_VENDOR) return FP.webgl.vendor;
         if (args[0] === UNMASKED_RENDERER) return FP.webgl.renderer;
         return value;
       });
-    if (typeof WebGLRenderingContext !== 'undefined') patchGetParameter(WebGLRenderingContext.prototype);
-    if (typeof WebGL2RenderingContext !== 'undefined') patchGetParameter(WebGL2RenderingContext.prototype);
+    }
+    // WebGPU назвал бы настоящую видеокарту. Отвечаем как на железе без поддержки.
+    wrapMethod(scope.GPU, 'requestAdapter', () => Promise.resolve(null));
   }
 
   // --- Canvas: меняем младший бит у части пикселей ----------------------------
-  if (FP.canvasNoise && typeof HTMLCanvasElement !== 'undefined') {
+  if (FP.canvasNoise) {
     const seed = FP.seed | 0;
     const noisePixels = (data, width) => {
-      // data: Uint8ClampedArray RGBA. Трогаем примерно каждый 16-й непрозрачный пиксель.
+      // data: RGBA. Трогаем примерно каждый 16-й непрозрачный пиксель.
       for (let i = 0, p = 0; i < data.length; i += 4, p++) {
         if (data[i + 3] === 0) continue;
         const h = hash(seed, p + width * 131);
         if ((h & 15) !== 0) continue;
-        const channel = (h >>> 4) % 3;
-        data[i + channel] ^= 1;
+        data[i + ((h >>> 4) % 3)] ^= 1;
       }
     };
-
-    const getImageData = CanvasRenderingContext2D.prototype.getImageData;
-    const putImageData = CanvasRenderingContext2D.prototype.putImageData;
-    const drawImage = CanvasRenderingContext2D.prototype.drawImage;
-    const getContext = HTMLCanvasElement.prototype.getContext;
-    const createElement = Document.prototype.createElement;
+    const Offscreen = scope.OffscreenCanvas;
+    const contexts = [scope.CanvasRenderingContext2D, scope.OffscreenCanvasRenderingContext2D].filter(Boolean);
+    const original2d = contexts.map((owner) => ({
+      owner,
+      getImageData: owner.prototype.getImageData,
+      putImageData: owner.prototype.putImageData,
+      drawImage: owner.prototype.drawImage,
+    }));
+    const createElement = inPage ? Document.prototype.createElement : null;
 
     // Копия холста с шумом; оригинал не трогаем, чтобы шум не накапливался.
     const noisyCopy = (canvas) => {
       const { width, height } = canvas;
       if (!width || !height) return null;
       try {
-        const copy = createElement.call(document, 'canvas');
-        copy.width = width;
-        copy.height = height;
-        const ctx = getContext.call(copy, '2d');
-        drawImage.call(ctx, canvas, 0, 0);
-        const image = getImageData.call(ctx, 0, 0, width, height);
+        const isOffscreen = Offscreen && canvas instanceof Offscreen;
+        const copy = isOffscreen ? new Offscreen(width, height) : createElement.call(document, 'canvas');
+        if (!isOffscreen) {
+          copy.width = width;
+          copy.height = height;
+        }
+        const ctx = copy.getContext('2d');
+        const api = original2d.find((entry) => ctx instanceof entry.owner);
+        api.drawImage.call(ctx, canvas, 0, 0);
+        const image = api.getImageData.call(ctx, 0, 0, width, height);
         noisePixels(image.data, width);
-        putImageData.call(ctx, image, 0, 0);
+        api.putImageData.call(ctx, image, 0, 0);
         return copy;
       } catch (e) {
         return null; // например, холст «загрязнён» чужой картинкой
       }
     };
+    const viaCopy = (target, self, args) => Reflect.apply(target, noisyCopy(self) || self, args);
 
-    wrapMethod(HTMLCanvasElement.prototype, 'toDataURL', (target, self, args) => {
-      const copy = self instanceof HTMLCanvasElement ? noisyCopy(self) : null;
-      return Reflect.apply(target, copy || self, args);
-    });
-    wrapMethod(HTMLCanvasElement.prototype, 'toBlob', (target, self, args) => {
-      const copy = self instanceof HTMLCanvasElement ? noisyCopy(self) : null;
-      return Reflect.apply(target, copy || self, args);
-    });
-    wrapMethod(CanvasRenderingContext2D.prototype, 'getImageData', (target, self, args) => {
-      const image = Reflect.apply(target, self, args);
-      noisePixels(image.data, image.width);
-      return image;
-    });
-
-    const patchReadPixels = (proto) =>
-      wrapMethod(proto, 'readPixels', (target, self, args) => {
+    if (scope.HTMLCanvasElement) {
+      wrapMethod(scope.HTMLCanvasElement, 'toDataURL', (t, self, a) => (self instanceof scope.HTMLCanvasElement ? viaCopy(t, self, a) : Reflect.apply(t, self, a)));
+      wrapMethod(scope.HTMLCanvasElement, 'toBlob', (t, self, a) => (self instanceof scope.HTMLCanvasElement ? viaCopy(t, self, a) : Reflect.apply(t, self, a)));
+    }
+    if (Offscreen) {
+      wrapMethod(Offscreen, 'convertToBlob', (t, self, a) => (self instanceof Offscreen ? viaCopy(t, self, a) : Reflect.apply(t, self, a)));
+    }
+    for (const owner of contexts) {
+      wrapMethod(owner, 'getImageData', (target, self, args) => {
+        const image = Reflect.apply(target, self, args);
+        noisePixels(image.data, image.width);
+        return image;
+      });
+    }
+    for (const owner of [scope.WebGLRenderingContext, scope.WebGL2RenderingContext]) {
+      wrapMethod(owner, 'readPixels', (target, self, args) => {
         const result = Reflect.apply(target, self, args);
         const pixels = args[6];
-        if (pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray) {
-          noisePixels(pixels, args[2] | 0);
-        }
+        if (pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray) noisePixels(pixels, args[2] | 0);
         return result;
       });
-    if (typeof WebGLRenderingContext !== 'undefined') patchReadPixels(WebGLRenderingContext.prototype);
-    if (typeof WebGL2RenderingContext !== 'undefined') patchReadPixels(WebGL2RenderingContext.prototype);
+    }
   }
 
   // --- Аудио: микроскопический сдвиг сэмплов ----------------------------------
-  if (FP.audioNoise && typeof AudioBuffer !== 'undefined') {
+  if (FP.audioNoise && scope.AudioBuffer) {
     const seed = (FP.seed | 0) ^ 0x5bd1e995;
     const noiseSamples = (samples) => {
       for (let i = 0; i < samples.length; i += 97) {
-        const h = hash(seed, i);
-        samples[i] += ((h & 0xffff) / 0xffff - 0.5) * 2e-7;
+        samples[i] += ((hash(seed, i) & 0xffff) / 0xffff - 0.5) * 2e-7;
       }
     };
     const touched = new WeakMap(); // AudioBuffer -> Set(номер канала)
 
-    wrapMethod(AudioBuffer.prototype, 'getChannelData', (target, self, args) => {
+    wrapMethod(scope.AudioBuffer, 'getChannelData', (target, self, args) => {
       const data = Reflect.apply(target, self, args);
       let channels = touched.get(self);
       if (!channels) touched.set(self, (channels = new Set()));
@@ -181,25 +184,19 @@
       }
       return data;
     });
-    wrapMethod(AudioBuffer.prototype, 'copyFromChannel', (target, self, args) => {
+    wrapMethod(scope.AudioBuffer, 'copyFromChannel', (target, self, args) => {
       const result = Reflect.apply(target, self, args);
       const channels = touched.get(self);
       // Если канал уже зашумлён через getChannelData, копия уже содержит шум.
-      if (args[0] instanceof Float32Array && !(channels && channels.has(args[1]))) {
-        noiseSamples(args[0]);
+      if (args[0] instanceof Float32Array && !(channels && channels.has(args[1]))) noiseSamples(args[0]);
+      return result;
+    });
+    wrapMethod(scope.AnalyserNode, 'getFloatFrequencyData', (target, self, args) => {
+      const result = Reflect.apply(target, self, args);
+      if (args[0] instanceof Float32Array) {
+        for (let i = 0; i < args[0].length; i += 7) args[0][i] += ((hash(seed, i) & 0xff) / 0xff - 0.5) * 1e-3;
       }
       return result;
     });
-    if (typeof AnalyserNode !== 'undefined') {
-      wrapMethod(AnalyserNode.prototype, 'getFloatFrequencyData', (target, self, args) => {
-        const result = Reflect.apply(target, self, args);
-        if (args[0] instanceof Float32Array) {
-          for (let i = 0; i < args[0].length; i += 7) {
-            args[0][i] += ((hash(seed, i) & 0xff) / 0xff - 0.5) * 1e-3;
-          }
-        }
-        return result;
-      });
-    }
   }
 })();

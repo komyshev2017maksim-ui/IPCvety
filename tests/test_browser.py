@@ -4,6 +4,7 @@ import http.server
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -38,11 +39,24 @@ PROBE = """async () => {
   for (let i = 0; i < samples.length; i++) audio += Math.abs(samples[i]);
   const audioAgain = Array.from(buffer.getChannelData(0)).reduce((a, v) => a + Math.abs(v), 0);
 
-  const worker = await new Promise((resolve) => {
-    const blob = new Blob(['postMessage({languages: navigator.languages, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, locale: Intl.DateTimeFormat().resolvedOptions().locale})']);
-    const w = new Worker(URL.createObjectURL(blob));
-    w.onmessage = (event) => resolve(event.data);
-  });
+  const workerSource = `(async () => {
+    const gl = new OffscreenCanvas(8, 8).getContext('webgl');
+    const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+    const c = new OffscreenCanvas(60, 20); const x = c.getContext('2d');
+    x.fillStyle = '#f60'; x.fillRect(0, 0, 60, 20);
+    const px = Array.from(x.getImageData(0, 0, 60, 20).data);
+    postMessage({
+      languages: navigator.languages, cores: navigator.hardwareConcurrency, memory: navigator.deviceMemory,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, locale: Intl.DateTimeFormat().resolvedOptions().locale,
+      renderer: ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null,
+      canvasNoised: px.some((v, i) => i % 4 < 3 && v !== [255, 102, 0][i % 4]),
+      native: Function.prototype.toString.call(WebGLRenderingContext.prototype.getParameter),
+    });
+  })()`;
+  const runWorker = (url) => new Promise((resolve) => { const w = new Worker(url); w.onmessage = (event) => resolve(event.data); });
+  const worker = await runWorker(URL.createObjectURL(new Blob([workerSource])));
+  const urlWorker = await runWorker('/worker.js?' + encodeURIComponent(workerSource));
+  const gpuAdapter = navigator.gpu ? await navigator.gpu.requestAdapter() : null;
 
   const native = (fn) => Function.prototype.toString.call(fn);
   return {
@@ -58,7 +72,7 @@ PROBE = """async () => {
     vendor, renderer, hasWebgl: Boolean(gl),
     canvas: first, canvasRepeatable: first === second, pixels,
     audio, audioRepeatable: audio === audioAgain,
-    worker,
+    worker, urlWorker, gpuAdapter, outer: { width: outerWidth, height: outerHeight },
     looksNative: [
       native(HTMLCanvasElement.prototype.toDataURL),
       native(Object.getOwnPropertyDescriptor(Navigator.prototype, 'hardwareConcurrency').get),
@@ -75,10 +89,12 @@ class _Site(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         type(self).seen_headers.append(dict(self.headers))
+        is_worker = self.path.startswith("/worker.js?")
+        body = urllib.parse.unquote(self.path.split("?", 1)[1]).encode() if is_worker else b"<!doctype html><title>probe</title>"
         self.send_response(200)
-        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Type", "text/javascript" if is_worker else "text/html")
         self.end_headers()
-        self.wfile.write(b"<!doctype html><title>probe</title>")
+        self.wfile.write(body)
 
     def log_message(self, *args):
         pass
@@ -96,14 +112,14 @@ def site():
 def probe(name: str, url: str) -> dict:
     result = {}
 
-    def on_ready(context, page):
-        result.update(page.evaluate(PROBE))
+    async def on_ready(tab):
+        result.update(await tab.evaluate(f"({PROBE})()"))
 
     try:
         launcher.open_profile(name, url=url, no_proxy=True, headless=True, on_ready=on_ready, log=lambda *_: None)
-    except Exception as exc:
-        if "Executable doesn't exist" in str(exc) or "not found" in str(exc).lower():
-            pytest.skip(f"Браузер не установлен: {str(exc).splitlines()[0]}")
+    except launcher.LaunchError as exc:
+        if "Не нашёл Google Chrome" in str(exc):
+            pytest.skip("Браузер не установлен")
         raise
     return result
 
@@ -117,10 +133,12 @@ def test_page_sees_profile_fingerprint(site):
     fp = make_profile("A", "Houston, TX")["fingerprint"]
     seen = probe("A", site)
 
-    assert seen["webdriver"] is False
+    assert seen["webdriver"] is False, "браузер не должен выглядеть управляемым программой"
     assert seen["cores"] == fp["hardwareConcurrency"]
     assert seen["memory"] == fp["deviceMemory"]
-    assert seen["languages"] == ["en-US", "en"] and seen["sameLanguagesObject"]
+    # Сколько языков показывать, решает сам Chrome (новые версии сокращают список до одного).
+    assert seen["languages"][0] == "en-US" and all(code.startswith("en") for code in seen["languages"])
+    assert seen["sameLanguagesObject"]
     assert seen["timezone"] == "America/Chicago"
     assert seen["locale"] == "en-US"
     assert seen["screen"] == {
@@ -129,21 +147,30 @@ def test_page_sees_profile_fingerprint(site):
         "availHeight": fp["screen"]["availHeight"],
     }
     assert seen["screenMedia"] is True  # размер экрана подменён на уровне движка
-    assert seen["inner"] == fp["viewport"]
+    assert seen["inner"]["width"] <= seen["outer"]["width"] <= fp["screen"]["width"]
     if seen["hasWebgl"]:
         assert seen["vendor"] == fp["webgl"]["vendor"]
         assert seen["renderer"] == fp["webgl"]["renderer"]
+    assert seen["gpuAdapter"] is None, "WebGPU не должен выдавать настоящую видеокарту"
     assert all("[native code]" in text for text in seen["looksNative"])
     assert seen["canvasRepeatable"] and seen["audioRepeatable"]
-
-    # То, что задаётся на уровне браузера, одинаково и в воркере.
-    assert seen["worker"] == {
-        "languages": ["en-US", "en"],
-        "timezone": "America/Chicago",
-        "locale": "en-US",
-    }
-    assert _Site.seen_headers[0]["Accept-Language"] == "en-US,en;q=0.9"
+    assert _Site.seen_headers[0]["Accept-Language"].startswith("en-US")
+    assert "ru" not in _Site.seen_headers[0]["Accept-Language"]
     assert not launcher.is_running(store.get("A")["id"])
+
+
+def test_workers_see_the_same_device_as_the_page(site):
+    fp = make_profile("A", "Houston, TX")["fingerprint"]
+    seen = probe("A", site)
+    for kind in ("worker", "urlWorker"):  # воркер из blob и воркер из файла на сайте
+        worker = seen[kind]
+        assert worker["languages"] == seen["languages"], kind
+        assert worker["timezone"] == "America/Chicago" and worker["locale"] == "en-US", kind
+        assert worker["cores"] == fp["hardwareConcurrency"], kind
+        assert worker["memory"] == fp["deviceMemory"], kind
+        assert worker["renderer"] in (fp["webgl"]["renderer"], None), kind
+        assert worker["canvasNoised"] is True, kind
+        assert "[native code]" in worker["native"], kind
 
 
 def test_profiles_differ_and_each_is_stable_between_launches(site):
@@ -170,6 +197,17 @@ def test_refuses_to_open_without_proxy_or_timezone(site):
     make_profile("B", "")
     with pytest.raises(launcher.LaunchError, match="часовой пояс"):
         launcher.open_profile("B", url=site, no_proxy=True, headless=True, log=lambda *_: None)
+
+
+def test_cookies_survive_export_and_import(site):
+    make_profile("A", "Miami, FL")
+    make_profile("B", "Miami, FL")
+    cookie = {"name": "sessionid", "value": "abc123", "domain": ".example.com", "path": "/",
+              "secure": True, "httpOnly": True, "expires": 1999999999}
+    assert launcher.import_cookies("A", [cookie]) == 1
+    exported = launcher.export_cookies("A")
+    assert [(c["name"], c["value"], c["domain"]) for c in exported] == [("sessionid", "abc123", ".example.com")]
+    assert launcher.export_cookies("B") == [], "cookies одного профиля не видны другому"
 
 
 # --- панель ---------------------------------------------------------------------

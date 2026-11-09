@@ -235,3 +235,32 @@ def public_view(profile: dict) -> dict:
     if view.get("proxy"):
         view["proxy"]["has_password"] = bool(view["proxy"].pop("password", ""))
     return view
+
+
+# --- Журнал профиля: что и когда с ним происходило --------------------------------
+
+
+def _events_file(profile_id: str):
+    return config.browser_data_dir(profile_id) / "antidetect-events.log"
+
+
+def log_event(profile_id: str, text: str) -> None:
+    try:
+        with open(_events_file(profile_id), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"t": now_iso(), "text": text}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def events(profile_id: str, limit: int = 30) -> list[dict]:
+    try:
+        lines = _events_file(profile_id).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    result = []
+    for line in lines[-limit:]:
+        try:
+            result.append(json.loads(line))
+        except ValueError:
+            pass
+    return result[::-1]

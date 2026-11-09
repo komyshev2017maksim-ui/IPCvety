@@ -79,17 +79,15 @@ def proxy_port():
 def open_and_read(name: str, **kwargs) -> dict:
     seen = {}
 
-    def on_ready(context, page):
-        seen["timezone"] = page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
-        seen["title"] = page.title()
+    async def on_ready(tab):
+        seen["timezone"] = await tab.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
+        seen["title"] = await tab.evaluate("document.title")
 
     try:
         launcher.open_profile(name, url="http://site.test/", headless=True, on_ready=on_ready,
                               log=lambda *_: None, **kwargs)
-    except launcher.LaunchError:
-        raise
-    except Exception as exc:
-        if "Executable doesn't exist" in str(exc):
+    except launcher.LaunchError as exc:
+        if "Не нашёл Google Chrome" in str(exc):
             pytest.skip("Браузер не установлен")
         raise
     return seen
@@ -111,8 +109,8 @@ def test_open_through_authenticated_proxy_uses_timezone_of_exit_ip(proxy_port):
 
     profile = store.get("A")
     assert profile["geo"]["ip"] == "198.51.100.23" and profile["last_opened"]
-    options = launcher.build_launch_options(profile, config.settings())
-    assert options["geolocation"] == {"latitude": 41.85, "longitude": -87.65, "accuracy": 1500}
+    assert (profile["geo"]["lat"], profile["geo"]["lon"]) == (41.85, -87.65)
+    assert profile["geo"]["ping_ms"] >= 0
 
 
 def test_wrong_proxy_password_stops_launch(proxy_port):

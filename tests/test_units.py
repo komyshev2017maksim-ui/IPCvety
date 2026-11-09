@@ -3,7 +3,7 @@ import json
 import pytest
 
 from antidetect import fingerprint, geo, launcher, netcheck, store
-from antidetect.proxy import Proxy, ProxyError, parse_proxy
+from antidetect.proxy import ProxyError, parse_proxy
 
 
 # --- прокси -------------------------------------------------------------------
@@ -32,11 +32,6 @@ def test_parse_proxy_rejects(text):
 
 def test_empty_proxy_is_none():
     assert parse_proxy("  ") is None
-
-
-def test_socks_with_password_is_refused():
-    with pytest.raises(ProxyError):
-        Proxy("socks5", "1.2.3.4", 1080, "u", "p").for_playwright()
 
 
 # --- часовые пояса --------------------------------------------------------------
@@ -92,7 +87,7 @@ def test_fingerprint_is_plausible(platform):
 
 def test_init_script_embeds_fingerprint():
     fp = fingerprint.generate("win", seed=7)
-    script = fingerprint.build_init_script(fp, ["en-US", "en"])
+    script = fingerprint.build_init_script(fp)
     assert "__FINGERPRINT__" not in script
     assert fp["webgl"]["renderer"] in script
 

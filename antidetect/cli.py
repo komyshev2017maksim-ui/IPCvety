@@ -209,13 +209,6 @@ def cmd_rm(args) -> int:
     return 0
 
 
-def cmd_install_browser(args) -> int:
-    import subprocess
-
-    print(f"Скачиваю Chromium в {config.home() / 'pw-browsers'}")
-    return subprocess.call([sys.executable, "-m", "playwright", "install", "chromium"])
-
-
 def cmd_ui(args) -> int:
     from . import ui
 
@@ -292,9 +285,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-y", "--yes", action="store_true")
     p.set_defaults(func=cmd_rm)
 
-    p = sub.add_parser("install-browser", help="скачать Chromium, если Google Chrome не установлен")
-    p.set_defaults(func=cmd_install_browser)
-
     p = sub.add_parser("ui", help="панель управления в браузере")
     p.add_argument("--port", type=int)
     p.add_argument("--no-browser", action="store_true", help="не открывать панель автоматически")
@@ -309,7 +299,6 @@ def main(argv: list[str] | None = None) -> int:
         except (AttributeError, ValueError):
             pass
     args = build_parser().parse_args(argv)
-    config.use_local_browser_cache()
     try:
         return args.func(args)
     except (store.StoreError, launcher.LaunchError, ProxyError) as exc:

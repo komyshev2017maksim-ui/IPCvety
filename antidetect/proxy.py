@@ -51,18 +51,6 @@ class Proxy:
             password=data.get("password") or "",
         )
 
-    def for_playwright(self) -> dict:
-        if self.scheme.startswith("socks") and self.username:
-            raise ProxyError(
-                "Chromium не умеет SOCKS-прокси с логином и паролем. "
-                "Возьмите у провайдера HTTP-порт того же прокси или белый список IP."
-            )
-        result = {"server": self.server}
-        if self.username:
-            result["username"] = self.username
-            result["password"] = self.password
-        return result
-
 
 def parse_proxy(text: str) -> Proxy | None:
     """Понимает форматы:

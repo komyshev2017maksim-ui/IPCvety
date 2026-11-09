@@ -111,22 +111,25 @@ def generate(platform: str | None = None, seed: int | None = None) -> dict:
     }
 
 
-def build_init_script(fingerprint: dict, languages: list[str]) -> str:
-    """JS, который Playwright выполняет в каждой вкладке и фрейме до скриптов сайта."""
-    import json
-
+def spoof_flags() -> dict:
+    """Отдельные подмены можно выключить в settings.json: {"spoof": {"webgl": false}}."""
     from . import config
 
+    flags = {"hardware": True, "webgl": True, "canvas": True, "audio": True}
+    flags.update(config.settings().get("spoof") or {})
+    return flags
+
+
+def build_init_script(fingerprint: dict) -> str:
+    """JS, который выполняется в каждой вкладке, фрейме и воркере до скриптов сайта."""
+    import json
+
+    flags = spoof_flags()
     payload = dict(fingerprint)
-    payload["languages"] = languages
-    # Отдельные подмены можно выключить в settings.json: {"spoof": {"hardware": false}}
-    spoof = {"hardware": True, "webgl": True, "canvas": True, "audio": True}
-    spoof.update(config.settings().get("spoof") or {})
-    if not spoof["hardware"]:
-        payload["hardwareConcurrency"] = payload["deviceMemory"] = None
-    if not spoof["webgl"]:
+    if not flags["hardware"]:
+        payload["deviceMemory"] = None
+    if not flags["webgl"]:
         payload["webgl"] = None
-    payload["canvasNoise"] = bool(payload.get("canvasNoise")) and spoof["canvas"]
-    payload["audioNoise"] = bool(payload.get("audioNoise")) and spoof["audio"]
-    template = INJECT_JS.read_text(encoding="utf-8")
-    return template.replace("__FINGERPRINT__", json.dumps(payload))
+    payload["canvasNoise"] = bool(payload.get("canvasNoise")) and flags["canvas"]
+    payload["audioNoise"] = bool(payload.get("audioNoise")) and flags["audio"]
+    return INJECT_JS.read_text(encoding="utf-8").replace("__FINGERPRINT__", json.dumps(payload))

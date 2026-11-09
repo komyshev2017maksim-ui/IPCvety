@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import time
+import urllib.error
+import urllib.request
+
 from . import store
 from .proxy import Proxy
 
@@ -37,28 +42,30 @@ def _parse(data: dict) -> dict | None:
     }
 
 
-def check_ip(playwright, proxy: Proxy | None, settings: dict) -> dict:
-    """Запрашивает сервисы определения IP через прокси. Первый ответивший побеждает."""
-    options = {"timeout": settings["ip_check_timeout"] * 1000}
-    if proxy:
-        options["proxy"] = proxy.for_playwright()
+def check_ip(proxy_url: str | None, settings: dict) -> dict:
+    """Спрашивает сервисы определения IP через прокси. Первый ответивший побеждает.
+
+    ``proxy_url`` — адрес локального переходника (relay.py), который уже
+    подставляет логин и пароль настоящего прокси.
+    """
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else {}
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+    opener.addheaders = [("User-Agent", "curl/8.5.0"), ("Accept", "application/json")]
     errors = []
-    request = playwright.request.new_context(**options)
-    try:
-        for url in settings["ip_services"]:
-            try:
-                response = request.get(url)
-                if not response.ok:
-                    errors.append(f"{url}: HTTP {response.status}")
-                    continue
-                geo = _parse(response.json())
-                if geo:
-                    return geo
-                errors.append(f"{url}: в ответе нет IP")
-            except Exception as exc:  # сеть, таймаут, не JSON
-                errors.append(f"{url}: {str(exc).splitlines()[0]}")
-    finally:
-        request.dispose()
+    for url in settings["ip_services"]:
+        started = time.monotonic()
+        try:
+            with opener.open(url, timeout=settings["ip_check_timeout"]) as response:
+                geo = _parse(json.loads(response.read()))
+            if geo:
+                geo["ping_ms"] = round((time.monotonic() - started) * 1000)
+                return geo
+            errors.append(f"{url}: в ответе нет IP")
+        except urllib.error.HTTPError as exc:
+            hint = " (прокси не принял логин и пароль)" if exc.code == 407 else ""
+            errors.append(f"{url}: HTTP {exc.code}{hint}")
+        except (OSError, ValueError) as exc:  # сеть, таймаут, не JSON
+            errors.append(f"{url}: {str(exc).splitlines()[0] if str(exc) else type(exc).__name__}")
     raise CheckError("Прокси не отвечает или сервисы IP недоступны:\n  " + "\n  ".join(errors))
 
 
