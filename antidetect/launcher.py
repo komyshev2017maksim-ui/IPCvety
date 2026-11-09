@@ -19,7 +19,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import config, fingerprint, geo as geo_tables, netcheck, store
+from . import config, cookiefile, fingerprint, geo as geo_tables, netcheck, store
 from .cdp import CDP, CDPError
 from .proxy import Proxy
 from .relay import Relay
@@ -503,6 +503,8 @@ def export_cookies(key: str) -> list[dict]:
 def import_cookies(key: str, cookies: list[dict]) -> int:
     profile = store.get(key)
     _require_closed(profile)
+
+    cookies = cookiefile.normalize(cookies)
 
     async def action(cdp: CDP):
         await cdp.send("Storage.setCookies", {"cookies": cookies})

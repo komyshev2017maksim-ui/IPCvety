@@ -15,11 +15,21 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, fingerprint, launcher, store
-from .proxy import ProxyError
+from . import brands, config, cookiefile, fingerprint, launcher, store
+from .proxy import ProxyError, parse_proxy
 
 INDEX_HTML = Path(__file__).with_name("static") / "index.html"
-MAX_BODY = 5 * 1024 * 1024
+MAX_BODY = 20 * 1024 * 1024
+
+# Страницы, на которых удобно посмотреть на профиль глазами сайта.
+TEST_PAGES = [
+    ("Pixelscan: сходится ли отпечаток с IP", "https://pixelscan.net/"),
+    ("CreepJS: ищет подменённые функции", "https://abrahamjuliot.github.io/creepjs/"),
+    ("BrowserLeaks: значения по каждому API", "https://browserleaks.com/"),
+    ("BrowserScan: общий отчёт", "https://www.browserscan.net/"),
+    ("IPhey: быстрый вердикт", "https://iphey.com/"),
+    ("Whoer: IP, DNS, пояс и язык", "https://whoer.net/"),
+]
 
 
 class ApiError(Exception):
@@ -32,7 +42,7 @@ def _log_file(profile_id: str) -> Path:
     return config.browser_data_dir(profile_id) / "antidetect-last.log"
 
 
-def _run_cli(*args: str, **popen_kwargs):
+def _cli(*args: str, **popen_kwargs):
     kwargs = {"cwd": str(config.REPO_DIR), **popen_kwargs}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -61,24 +71,41 @@ def state() -> dict:
         "duplicates": store.duplicates(profiles),
         "home": str(config.home()),
         "expected_country": config.settings().get("expected_country"),
+        "groups": brands.GROUPS,
+        "statuses": brands.STATUSES,
+        "steps": brands.STEPS,
+        "test_pages": TEST_PAGES,
     }
+
+
+def _require(profiles: list[dict], profile_id: str) -> dict:
+    profile = store.find(profiles, profile_id)
+    if profile is None:
+        raise ApiError("Профиль не найден", 404)
+    return profile
+
+
+def _closed(profile: dict) -> None:
+    if launcher.is_running(profile["id"]):
+        raise ApiError(f"Сначала закройте браузер профиля {profile['name']}")
 
 
 def _update(profile_id: str, body: dict) -> None:
     with store.transaction() as profiles:
-        profile = store.find(profiles, profile_id)
-        if profile is None:
-            raise ApiError("Профиль не найден", 404)
-        fields = {k: body.get(k) for k in ("brand", "site", "instagram", "proxy_city", "timezone", "notes")}
+        profile = _require(profiles, profile_id)
+        if body.get("name") and body["name"].strip() != profile["name"]:
+            store.rename(profiles, profile, body["name"])
         if "proxy" in body:
             store.set_proxy(profile, body["proxy"] or "")
-        store.apply_fields(profile, fields)
+        store.apply_fields(profile, {k: body.get(k) for k in store.EDITABLE})
         if profile.get("proxy"):
             if body.get("proxy_user") is not None:
                 profile["proxy"]["username"] = body["proxy_user"]
             # Пустое поле пароля в форме значит «не менять».
             if body.get("proxy_pass"):
                 profile["proxy"]["password"] = body["proxy_pass"]
+        if "status" in body:
+            store.log_event(profile["id"], f"Статус: {dict(brands.STATUSES).get(body['status'], body['status'])}")
 
 
 def _open(profile_id: str, body: dict) -> None:
@@ -86,41 +113,100 @@ def _open(profile_id: str, body: dict) -> None:
     if launcher.is_running(profile["id"]):
         raise ApiError("Профиль уже открыт")
     extra = []
+    url = str(body.get("url") or "")
+    if url:
+        if not url.startswith(("https://", "http://")):
+            raise ApiError("Адрес страницы должен начинаться с https://")
+        extra += ["--url", url]
     if body.get("no_proxy"):
         extra.append("--no-proxy")
     if body.get("force"):
         extra.append("--force")
-    log = open(_log_file(profile["id"]), "w", encoding="utf-8")
-    command, kwargs = _run_cli("open", profile["id"], *extra, stdout=log, stderr=subprocess.STDOUT)
-    subprocess.Popen(command, **kwargs)
-    log.close()
+    with open(_log_file(profile["id"]), "w", encoding="utf-8") as log:
+        command, kwargs = _cli("open", profile["id"], *extra, stdout=log, stderr=subprocess.STDOUT)
+        subprocess.Popen(command, **kwargs)
 
 
 def _check(profile_id: str) -> dict:
     profile = store.get(profile_id)
-    command, kwargs = _run_cli("check", profile["id"], capture_output=True, timeout=180)
+    command, kwargs = _cli("check", profile["id"], capture_output=True, timeout=180)
     result = subprocess.run(command, **kwargs)
     output = (result.stdout + result.stderr).decode("utf-8", errors="replace").strip()
     return {"ok": result.returncode == 0, "output": output}
 
 
-def _regen(profile_id: str) -> None:
+def _trash(profile_id: str) -> None:
     with store.transaction() as profiles:
-        profile = store.find(profiles, profile_id)
-        if profile is None:
-            raise ApiError("Профиль не найден", 404)
-        if launcher.is_running(profile["id"]):
-            raise ApiError("Сначала закройте браузер профиля")
-        profile["fingerprint"] = fingerprint.generate()
+        profile = _require(profiles, profile_id)
+        _closed(profile)
+        profile["deleted_at"] = store.now_iso()
 
 
-def _delete(profile_id: str) -> None:
+def _restore(profile_id: str) -> None:
+    with store.transaction() as profiles:
+        _require(profiles, profile_id)["deleted_at"] = None
+
+
+def _purge(profile_id: str) -> None:
     profile = store.get(profile_id)
-    if launcher.is_running(profile["id"]):
-        raise ApiError("Сначала закройте браузер профиля")
+    _closed(profile)
     with store.transaction() as profiles:
         profiles[:] = [p for p in profiles if p["id"] != profile["id"]]
     shutil.rmtree(config.browser_data_dir(profile["id"]), ignore_errors=True)
+
+
+def _regen(profile_id: str) -> None:
+    with store.transaction() as profiles:
+        profile = _require(profiles, profile_id)
+        _closed(profile)
+        profile["fingerprint"] = fingerprint.generate()
+    store.log_event(profile["id"], "Отпечаток сменён")
+
+
+def _bulk(body: dict) -> dict:
+    ids, action, value = body.get("ids") or [], body.get("action"), body.get("value")
+    done, errors = 0, []
+    for profile_id in ids:
+        try:
+            if action == "open":
+                _open(profile_id, {})
+            elif action == "stop":
+                launcher.request_stop(store.get(profile_id)["id"])
+            elif action == "trash":
+                _trash(profile_id)
+            elif action == "restore":
+                _restore(profile_id)
+            elif action in ("status", "group"):
+                _update(profile_id, {action: value or ""})
+            else:
+                raise ApiError("Неизвестное действие")
+            done += 1
+        except (ApiError, store.StoreError, launcher.LaunchError) as exc:
+            errors.append(str(exc))
+    return {"done": done, "errors": errors}
+
+
+def _assign_proxies(body: dict) -> dict:
+    """Раздаёт вставленный список прокси: по одному на профиль, по порядку."""
+    lines = [line.strip() for line in str(body.get("text") or "").splitlines() if line.strip()]
+    parsed = []
+    for number, line in enumerate(lines, start=1):
+        try:
+            parsed.append((line, parse_proxy(line)))
+        except ProxyError as exc:
+            raise ApiError(f"Строка {number}: {exc}") from exc
+    ids = body.get("ids") or []
+    assigned = []
+    with store.transaction() as profiles:
+        if ids:
+            targets = [_require(profiles, profile_id) for profile_id in ids]
+        else:
+            targets = [p for p in profiles if not p.get("proxy") and not p.get("deleted_at")]
+        for profile, (line, _) in zip(targets, parsed):
+            store.set_proxy(profile, line)
+            assigned.append(profile["name"])
+    return {"assigned": assigned, "left_proxies": max(0, len(parsed) - len(assigned)),
+            "left_profiles": max(0, len(targets) - len(assigned))}
 
 
 def handle_post(path: str, body) -> dict:
@@ -129,14 +215,19 @@ def handle_post(path: str, body) -> dict:
         if not isinstance(body, list):
             raise ApiError("Ожидается массив профилей из instagram-profiles.json")
         return store.import_records(body)
+    if parts == ["api", "seed"]:
+        return store.import_records(brands.records())
+    if parts == ["api", "bulk"]:
+        return _bulk(body)
+    if parts == ["api", "proxies"]:
+        return _assign_proxies(body)
     if parts == ["api", "profiles"]:
         with store.transaction() as profiles:
             profile = store.new_profile(profiles, str(body.get("name") or ""))
         try:
             _update(profile["id"], body)
         except Exception:
-            # Например, прокси с опечаткой: не оставляем полупустой профиль.
-            _delete(profile["id"])
+            _purge(profile["id"])  # например, прокси с опечаткой: не оставляем полупустой профиль
             raise
         return {"id": profile["id"]}
     if len(parts) >= 3 and parts[:2] == ["api", "profiles"]:
@@ -151,8 +242,21 @@ def handle_post(path: str, body) -> dict:
             return _check(profile_id)
         elif action == "regen":
             _regen(profile_id)
-        elif action == "delete":
-            _delete(profile_id)
+        elif action == "trash":
+            _trash(profile_id)
+        elif action == "restore":
+            _restore(profile_id)
+        elif action == "purge":
+            _purge(profile_id)
+        elif action == "clone":
+            with store.transaction() as profiles:
+                return {"id": store.clone(profiles, _require(profiles, profile_id))["id"]}
+        elif action == "events":
+            return {"events": store.events(store.get(profile_id)["id"])}
+        elif action == "cookies-export":
+            return {"cookies": launcher.export_cookies(profile_id)}
+        elif action == "cookies-import":
+            return {"count": launcher.import_cookies(profile_id, cookiefile.parse(str(body.get("text") or "")))}
         else:
             raise ApiError("Неизвестное действие", 404)
         return {"ok": True}

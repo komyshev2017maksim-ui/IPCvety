@@ -263,5 +263,43 @@ def test_panel_api(panel):
     call(panel, f"/api/profiles/{created['id']}/regen", {}, ok)
     assert store.get("IG-01")["fingerprint"] != fp_before
 
-    call(panel, f"/api/profiles/{created['id']}/delete", {}, ok)
-    assert [p["name"] for p in store.all_profiles()] == ["IG-05"]
+    # Карточка: статус, метки, шаги, переименование.
+    call(panel, f"/api/profiles/{created['id']}", {"name": "IG-01a", "status": "warm", "tags": ["vip"],
+                                                   "steps": {"num": True}, "email": "a@example.com"}, ok)
+    profile = store.get("IG-01a")
+    assert (profile["status"], profile["tags"], profile["steps"]) == ("warm", ["vip"], {"num": True})
+    _, events = call(panel, f"/api/profiles/{created['id']}/events", {}, ok)
+    assert any("Прогрев" in event["text"] for event in events["events"])
+
+    # Копия: новый отпечаток, прокси и почта не копируются.
+    _, copy = call(panel, f"/api/profiles/{created['id']}/clone", {}, ok)
+    clone = store.get(copy["id"])
+    assert clone["name"] == "IG-01a копия" and clone["proxy"] is None and clone["email"] == ""
+    assert store.get("IG-01a")["id"] == created["id"], "название одного профиля не должно совпадать с id другого"
+    assert clone["fingerprint"] != profile["fingerprint"] and clone["tags"] == ["vip"]
+
+    # Прокси списком: раздаются профилям без прокси, по одному.
+    status, result = call(panel, "/api/proxies", {"text": "5.5.5.5:1:u:p\nsocks5://u:p@6.6.6.6:2\n7.7.7.7:3"}, ok)
+    assert result["assigned"] == ["IG-05", "IG-01a копия"] and result["left_proxies"] == 1
+    assert store.get("IG-05")["proxy"]["password"] == "p" and store.get(copy["id"])["proxy"]["scheme"] == "socks5"
+    status, error = call(panel, "/api/proxies", {"text": "мусор"}, ok)
+    assert status == 400 and "Строка 1" in error["error"]
+
+    # Массовые действия и корзина.
+    ids = [p["id"] for p in store.all_profiles()]
+    _, result = call(panel, "/api/bulk", {"ids": ids, "action": "group", "value": "Лодки"}, ok)
+    assert result["done"] == 3 and all(p["group"] == "Лодки" for p in store.all_profiles())
+    call(panel, f"/api/profiles/{created['id']}/trash", {}, ok)
+    assert store.get("IG-01a")["deleted_at"] and len(store.all_profiles()) == 3
+    assert "прокси 1.2.3.4:8000" not in json.dumps(call(panel, "/api/state")[1]["duplicates"], ensure_ascii=False)
+    call(panel, f"/api/profiles/{created['id']}/restore", {}, ok)
+    assert store.get("IG-01a")["deleted_at"] is None
+    call(panel, f"/api/profiles/{created['id']}/purge", {}, ok)
+    assert "IG-01a" not in [p["name"] for p in store.all_profiles()]
+
+    # Карточки 33 брендов создаются один раз.
+    _, seeded = call(panel, "/api/seed", {}, ok)
+    assert len(seeded["created"]) == 32 and seeded["updated"] == ["IG-05"]
+    _, again = call(panel, "/api/seed", {}, ok)
+    assert again["created"] == [] and again["updated"] == []
+    assert store.get("IG-33")["site"] == "rvcamperremoval.com" and store.get("IG-12")["group"] == "Расчистка участков"

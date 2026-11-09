@@ -32,7 +32,7 @@ def cmd_import(args) -> int:
 
 
 def cmd_list(args) -> int:
-    profiles = store.all_profiles()
+    profiles = [p for p in store.all_profiles() if not p.get("deleted_at")]
     if not profiles:
         print("Профилей нет. Импортируйте instagram-profiles.json или создайте профиль командой add.")
         return 0
@@ -209,6 +209,27 @@ def cmd_rm(args) -> int:
     return 0
 
 
+def cmd_seed(args) -> int:
+    from . import brands
+
+    result = store.import_records(brands.records())
+    print(f"Создано карточек: {len(result['created'])}, обновлено: {len(result['updated'])}")
+    return 0
+
+
+def cmd_cookies(args) -> int:
+    from . import cookiefile
+
+    if args.action == "export":
+        cookies = launcher.export_cookies(args.profile)
+        Path(args.file).write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"Выгружено cookies: {len(cookies)} -> {args.file}")
+    else:
+        cookies = cookiefile.parse(Path(args.file).read_text(encoding="utf-8-sig"))
+        print(f"Загружено cookies: {launcher.import_cookies(args.profile, cookies)}")
+    return 0
+
+
 def cmd_ui(args) -> int:
     from . import ui
 
@@ -284,6 +305,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("profile")
     p.add_argument("-y", "--yes", action="store_true")
     p.set_defaults(func=cmd_rm)
+
+    p = sub.add_parser("seed", help="создать карточки 33 брендов сетки")
+    p.set_defaults(func=cmd_seed)
+
+    p = sub.add_parser("cookies", help="экспорт и импорт cookies закрытого профиля (JSON или Netscape)")
+    p.add_argument("action", choices=["export", "import"])
+    p.add_argument("profile")
+    p.add_argument("file")
+    p.set_defaults(func=cmd_cookies)
 
     p = sub.add_parser("ui", help="панель управления в браузере")
     p.add_argument("--port", type=int)

@@ -113,7 +113,8 @@ def new_profile(profiles: list[dict], name: str, **fields) -> dict:
     if any(p["name"].lower() == name.lower() for p in profiles):
         raise StoreError(f"Профиль с названием {name} уже есть")
     base = slugify(name)
-    taken = {p["id"] for p in profiles}
+    # id не должен совпадать и с чужим названием: по названию профиль ищут в командной строке.
+    taken = {p["id"] for p in profiles} | {p["name"].lower() for p in profiles if p["name"].lower() != p["id"]}
     profile_id, counter = base, 2
     while profile_id in taken:
         profile_id, counter = f"{base}-{counter}", counter + 1
@@ -130,6 +131,14 @@ def new_profile(profiles: list[dict], name: str, **fields) -> dict:
         "geo": None,
         "fingerprint": fingerprint.generate(),
         "notes": "",
+        "status": "none",
+        "group": "",
+        "tags": [],
+        "email": "",
+        "phone": "",
+        "phone_until": "",
+        "steps": {},
+        "deleted_at": None,
         "created_at": now_iso(),
         "last_opened": None,
     }
@@ -138,7 +147,10 @@ def new_profile(profiles: list[dict], name: str, **fields) -> dict:
     return profile
 
 
-EDITABLE = {"brand", "site", "instagram", "proxy_city", "timezone", "notes", "n"}
+EDITABLE = {
+    "brand", "site", "instagram", "proxy_city", "timezone", "notes", "n",
+    "status", "group", "tags", "email", "phone", "phone_until", "steps",
+}
 
 
 def apply_fields(profile: dict, fields: dict) -> None:
@@ -190,6 +202,7 @@ def import_records(records: list[dict]) -> dict:
                 "instagram": record.get("instagram"),
                 "proxy_city": record.get("proxy_city"),
                 "timezone": record.get("timezone"),
+                "group": record.get("group"),
             }
             proxy_text = str(record.get("proxy") or "").strip()
             existing = find(profiles, name)
@@ -217,11 +230,15 @@ def duplicates(profiles: list[dict]) -> dict[str, list[str]]:
     """Что повторяется между профилями: адрес прокси, IP выхода, логин Instagram."""
     seen: dict[tuple[str, str], list[str]] = {}
     for profile in profiles:
+        if profile.get("deleted_at"):
+            continue
         proxy = Proxy.from_dict(profile.get("proxy"))
         values = {
             "прокси": proxy.endpoint if proxy else "",
             "IP выхода": (profile.get("geo") or {}).get("ip", ""),
-            "логин Instagram": (profile.get("instagram") or "").lower(),
+            "логин Instagram": (profile.get("instagram") or "").lower().lstrip("@"),
+            "почта": (profile.get("email") or "").lower(),
+            "номер": "".join(ch for ch in profile.get("phone") or "" if ch.isdigit()),
         }
         for kind, value in values.items():
             if value:
@@ -264,3 +281,30 @@ def events(profile_id: str, limit: int = 30) -> list[dict]:
         except ValueError:
             pass
     return result[::-1]
+
+
+# --- Корзина, переименование, копия -------------------------------------------------
+
+
+def rename(profiles: list[dict], profile: dict, name: str) -> None:
+    name = name.strip()
+    if not name:
+        raise StoreError("У профиля должно быть название")
+    if any(p is not profile and p["name"].lower() == name.lower() for p in profiles):
+        raise StoreError(f"Профиль с названием {name} уже есть")
+    if any(p is not profile and p["id"] == name.lower() for p in profiles):
+        raise StoreError(f"Название {name} занято служебным именем другого профиля, выберите другое")
+    profile["name"] = name
+
+
+def clone(profiles: list[dict], source: dict) -> dict:
+    """Копия карточки с новым отпечатком и пустым браузером. Прокси, логин, почта и
+    номер не копируются: они должны быть у каждого аккаунта свои."""
+    base, counter = f"{source['name']} копия", 2
+    name = base
+    while any(p["name"].lower() == name.lower() for p in profiles):
+        name, counter = f"{base} {counter}", counter + 1
+    return new_profile(
+        profiles, name, brand=source.get("brand"), site=source.get("site"), group=source.get("group"),
+        tags=list(source.get("tags") or []), proxy_city=source.get("proxy_city"), notes=source.get("notes"),
+    )
