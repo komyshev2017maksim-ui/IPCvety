@@ -59,6 +59,13 @@
   .btn.ghost:hover { background: var(--hover); color: var(--ink); }
   .btn.danger { color: var(--bad); }
   .btn.small { height: 28px; padding: 0 10px; }
+  .map { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+  .map:empty { display: none; }
+  .map button { width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); padding: 0; position: relative; font-size: 10px; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .map button::after { content: ""; position: absolute; left: 3px; right: 3px; bottom: 2px; height: 3px; border-radius: 2px; background: var(--c); }
+  .map button:hover { border-color: var(--muted); color: var(--ink); }
+  .map button.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); color: var(--ink); }
+  .ok-text { color: var(--accent); } .bad-text { color: var(--bad); }
   .notice { border: 1px solid var(--line); border-left: 3px solid var(--warn); background: var(--warn-soft); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; display: grid; gap: 3px; }
   .notice:empty { display: none; }
 
@@ -156,6 +163,7 @@
     <input type="file" id="import-file" accept=".json,application/json" hidden>
     <input type="file" id="cookie-file" accept=".json,.txt,application/json,text/plain" hidden>
   </div>
+  <div class="map" id="map"></div>
   <div class="notice" id="notice"></div>
   <div class="table">
     <table>
@@ -235,6 +243,10 @@ function toast(text, ms = 5000) {
 const guard = (fn) => async (...args) => { try { return await fn(...args); } catch (error) { toast(error.message, 9000); } finally { await refresh(); } };
 
 // --- справочники -------------------------------------------------------------
+function shortGpu(renderer) {
+  const match = /ANGLE \([^,]+, (.+?)(?: Direct3D| \(|, |$)/.exec(renderer || '');
+  return match ? match[1].replace(/\(R\)|\(TM\)/g, '').replace(/^ANGLE Metal Renderer: /, '').trim() : (renderer || '');
+}
 const statusName = (key) => (state.statuses.find((s) => s[0] === key) || [null, 'Не начат'])[1];
 const flag = (code) => (code && code.length === 2
   ? String.fromCodePoint(...[...code.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65)) : '');
@@ -248,7 +260,7 @@ function daysLeft(date) {
 }
 function needsAttention(p) {
   const left = daysLeft(p.phone_until);
-  return failed(p) || ['issue', 'ban'].includes(p.status) || (left !== null && left <= 5)
+  return failed(p) || Boolean(p.preflight && p.preflight.blocked) || ['issue', 'ban'].includes(p.status) || (left !== null && left <= 5)
     || Boolean(p.geo && state.expected_country && p.geo.country && p.geo.country !== state.expected_country);
 }
 function visible() {
@@ -384,6 +396,8 @@ function row(p) {
     el('td', {}, el('div', { class: 'steps' }, el('i', {}, el('b', { style: `width:${(done / Math.max(1, state.steps.length)) * 100}%` })), `${done}/${state.steps.length}`),
       left !== null && left <= 5 ? el('div', { class: 'err' }, left < 0 ? 'аренда номера истекла' : `номер: осталось ${left} дн.`) : null),
     el('td', {}, el('div', { class: 'sub' }, p.running ? 'открыт сейчас' : (when(p.last_opened) || 'не открывался')),
+      p.preflight ? el('div', { class: 'sub ' + (p.preflight.failed.length ? 'bad-text' : 'ok-text'), title: 'Самопроверка подмен при последнем запуске' },
+        `самопроверка ${p.preflight.passed}/${p.preflight.total}`) : null,
       failed(p) ? el('div', { class: 'err', title: p.log }, p.log.replace(/^[\s\S]*?Ошибка: /, '')) : null),
     el('td', {}, el('button', { class: 'kebab', type: 'button', 'aria-label': 'Действия', onclick: (e) => rowMenu(e.currentTarget, p) }, '⋯')),
   );
@@ -446,6 +460,9 @@ function render() {
     ] : [el('span', {}, view.nav === 'trash' ? 'Корзина пуста.' : 'Под этот фильтр ничего не подошло.')]));
   }
   $('notice').replaceChildren(...Object.entries(state.duplicates).map(([what, names]) => el('div', {}, `Повтор: ${what} у профилей ${names.join(', ')}`)));
+  $('map').replaceChildren(...(view.nav === 'trash' ? [] : live().slice().sort((a, b) => (a.n ?? 1e9) - (b.n ?? 1e9) || a.name.localeCompare(b.name))
+    .map((p, index) => el('button', { type: 'button', class: p.running ? 'on' : '', style: `--c: var(--s-${p.status || 'none'})`,
+      title: `${p.name} · ${p.brand || ''} · ${statusName(p.status)}`, onclick: () => openDrawer(p.id) }, String(p.n ?? index + 1)))));
   renderBulk();
   const head = $('drawer-run');
   if (head && drawer && drawer.id) {
@@ -477,7 +494,8 @@ function collect(form, raw = false) {
   for (const node of form.elements) {
     if (!node.name) continue;
     if (raw) { body[node.name] = node.type === 'checkbox' ? node.checked : node.value; continue; }
-    if (node.name.startsWith('step:')) steps[node.name.slice(5)] = node.checked;
+    if (node.name.startsWith('fp:')) { (body.fingerprint ||= {})[node.name.slice(3)] = node.type === 'checkbox' ? node.checked : node.value; }
+    else if (node.name.startsWith('step:')) steps[node.name.slice(5)] = node.checked;
     else if (node.name === 'tags') body.tags = node.value.split(',').map((t) => t.trim()).filter(Boolean);
     else body[node.name] = node.value.trim();
   }
@@ -505,6 +523,7 @@ function renderDrawer() {
       el('div', { class: 'two' }, input('instagram', 'Логин Instagram', p.instagram, { placeholder: 'без @' }), input('email', 'Почта аккаунта', p.email)),
       el('div', { class: 'two' }, input('phone', 'Номер телефона', p.phone, { placeholder: '+1…' }), input('phone_until', 'Аренда номера до', p.phone_until, { type: 'date' })),
       input('notes', 'Заметки', p.notes, { area: true }),
+      input('start_urls', 'Стартовые страницы, по одной на строку (пусто: Instagram)', p.start_urls, { area: true, mono: true, placeholder: 'https://www.instagram.com/' }),
       el('div', { class: 'nav-title', style: 'padding-left:0' }, 'Шаги запуска'),
       el('div', { class: 'checks' }, state.steps.map(([key, label]) => el('label', {}, el('input', { type: 'checkbox', name: 'step:' + key, checked: Boolean(p.steps && p.steps[key]) }), label))),
     ]);
@@ -522,18 +541,29 @@ function renderDrawer() {
       el('dt', {}, 'Отклик'), el('dd', {}, p.geo && p.geo.ping_ms ? p.geo.ping_ms + ' мс' : '—'),
       el('dt', {}, 'Пояс браузера'), el('dd', {}, p.effective_timezone || 'неизвестен'),
       el('dt', {}, 'Проверен'), el('dd', {}, p.geo ? when(p.geo.checked_at) : '—')),
-    el('button', { class: 'btn', type: 'button', disabled: !p.proxy, onclick: async () => { await act(p, 'check'); if (drawer) renderDrawer(); } }, 'Проверить IP'));
+    input('proxy_rotate_url', 'Ссылка смены IP (для мобильных прокси, необязательно)', p.proxy_rotate_url, { mono: true, placeholder: 'https://provider.example/changeip?key=…' }),
+    el('div', { style: 'display:flex; gap:8px' },
+      el('button', { class: 'btn', type: 'button', disabled: !p.proxy, onclick: async () => { await act(p, 'check'); if (drawer) renderDrawer(); } }, 'Проверить IP'),
+      p.proxy_rotate_url ? el('button', { class: 'btn', type: 'button', onclick: async () => { await act(p, 'rotate'); if (drawer) renderDrawer(); } }, 'Сменить IP') : null));
 
   const fp = p && p.fingerprint;
+  const opts = state.fp_options || { screens: [], cores: [], memory: [], gpus: [] };
   const print = creating ? null : section('print',
-    el('p', { class: 'hint' }, 'Отпечаток создаётся один раз и не меняется между входами. Система, версия браузера и шрифты настоящие.'),
-    el('dl', { class: 'kv' },
-      el('dt', {}, 'Экран'), el('dd', {}, `${fp.screen.width}×${fp.screen.height}`),
-      el('dt', {}, 'Ядра и память'), el('dd', {}, `${fp.hardwareConcurrency} ядер, ${fp.deviceMemory} ГБ`),
-      el('dt', {}, 'Видеокарта'), el('dd', {}, fp.webgl ? fp.webgl.renderer : 'настоящая'),
-      el('dt', {}, 'Canvas и аудио'), el('dd', {}, 'шум по зерну ' + fp.seed),
-      el('dt', {}, 'WebRTC'), el('dd', {}, 'только через прокси'),
-      el('dt', {}, 'Пояс и геолокация'), el('dd', {}, 'по IP прокси')),
+    el('p', { class: 'hint' }, 'Отпечаток создаётся один раз и не меняется между входами. При первом запуске экран и видеокарта подстраиваются под ваш компьютер, чтобы не было расхождений. Система, версия браузера и шрифты настоящие.'),
+    p.preflight ? el('div', { class: 'notice', style: p.preflight.failed.length ? '' : 'border-left-color: var(--accent); background: var(--accent-soft)' },
+      el('div', {}, `Самопроверка при запуске ${when(p.preflight.at)}: ${p.preflight.passed} из ${p.preflight.total}` + (p.preflight.blocked ? '. Запуск был остановлен' : '')),
+      p.preflight.failed.map((f) => el('div', { class: 'sub', style: 'max-width:none; white-space:normal' }, `${f.name}: получено ${JSON.stringify(f.got)}, ожидалось ${JSON.stringify(f.want)}`))) : null,
+    el('div', { class: 'two' },
+      select('fp:screen', 'Экран', `${fp.screen.width}x${fp.screen.height}`, [...new Set([`${fp.screen.width}x${fp.screen.height}`, ...opts.screens])].map((v) => [v, v.replace('x', '×')])),
+      select('fp:gpu', 'Видеокарта', fp.webgl ? fp.webgl.renderer : '', [['', 'Настоящая (без подмены)'],
+        ...[...new Set([...(fp.webgl ? [fp.webgl.renderer] : []), ...opts.gpus])].map((v) => [v, shortGpu(v)])])),
+    el('div', { class: 'two' },
+      select('fp:hardwareConcurrency', 'Ядра процессора', String(fp.hardwareConcurrency), [...new Set([fp.hardwareConcurrency, ...opts.cores])].sort((a, b) => a - b).map((v) => [String(v), String(v)])),
+      select('fp:deviceMemory', 'Память, ГБ', String(fp.deviceMemory), [...new Set([fp.deviceMemory, ...opts.memory])].sort((a, b) => a - b).map((v) => [String(v), String(v)]))),
+    el('div', { class: 'checks', style: 'margin-bottom:12px' },
+      el('label', {}, el('input', { type: 'checkbox', name: 'fp:canvasNoise', checked: Boolean(fp.canvasNoise) }), 'Шум canvas (свой у каждого профиля)'),
+      el('label', {}, el('input', { type: 'checkbox', name: 'fp:audioNoise', checked: Boolean(fp.audioNoise) }), 'Шум аудио')),
+    el('p', { class: 'hint' }, 'WebRTC идёт только через прокси, пояс и геолокация берутся по IP. Правки сохраняются кнопкой «Сохранить» у закрытого профиля.'),
     el('div', { class: 'nav-title', style: 'padding-left:0' }, 'Посмотреть на профиль глазами сайта'),
     el('div', { class: 'stack' }, state.test_pages.map(([label, url]) => el('button', { class: 'btn', type: 'button', disabled: p.running,
       onclick: () => act(p, 'open', { url }) }, label))),

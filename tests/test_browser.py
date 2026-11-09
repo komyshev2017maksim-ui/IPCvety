@@ -157,6 +157,19 @@ def test_page_sees_profile_fingerprint(site):
     assert _Site.seen_headers[0]["Accept-Language"].startswith("en-US")
     assert "ru" not in _Site.seen_headers[0]["Accept-Language"]
     assert not launcher.is_running(store.get("A")["id"])
+    report = store.get("A")["preflight"]
+    assert report["passed"] == report["total"] >= 8 and not report["blocked"], report
+
+
+def test_launch_stops_before_any_site_when_spoofing_did_not_apply(site, monkeypatch):
+    make_profile("A", "Houston, TX")
+    # Имитируем сбой: проверка сообщает, что пояс не тот.
+    monkeypatch.setattr(launcher.preflight, "evaluate",
+                        lambda seen, profile, settings, tz: [{"name": "Часовой пояс", "ok": False, "got": seen["timezone"], "want": "Mars/Olympus", "critical": True}])
+    with pytest.raises(launcher.LaunchError, match="Самопроверка не пройдена: Часовой пояс"):
+        launcher.open_profile("A", url=site, no_proxy=True, headless=True, log=lambda *_: None)
+    assert _Site.seen_headers == [], "до сайта дело не дошло"
+    assert store.get("A")["preflight"]["blocked"] is True
 
 
 def test_workers_see_the_same_device_as_the_page(site):

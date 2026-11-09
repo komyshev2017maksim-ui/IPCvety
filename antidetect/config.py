@@ -26,6 +26,8 @@ DEFAULT_SETTINGS = {
     # Сервисы определения IP, по порядку. Через них идёт только IP прокси.
     "ip_services": ["https://ipinfo.io/json", "https://ipapi.co/json/"],
     "ip_check_timeout": 20,
+    # Раз в сколько минут сверять IP выхода, пока профиль открыт. 0 выключает.
+    "ip_watch_minutes": 5,
     "ui_port": 8765,
     "start_url": "https://www.instagram.com/",
 }

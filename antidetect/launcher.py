@@ -19,7 +19,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import config, cookiefile, fingerprint, geo as geo_tables, netcheck, store
+from . import config, cookiefile, fingerprint, geo as geo_tables, netcheck, preflight, store
 from .cdp import CDP, CDPError
 from .proxy import Proxy
 from .relay import Relay
@@ -181,7 +181,6 @@ def build_command(profile: dict, settings: dict, *, debug_port: int, proxy_url: 
         f"--accept-lang={','.join(languages)}",
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-features=WebRtcHideLocalIpsWithMdns",
         f"--window-size={view['width']},{view['height'] + fingerprint.BROWSER_CHROME_HEIGHT}",
     ]
     if proxy_url:
@@ -309,6 +308,72 @@ class _Session:
                     pass
 
 
+def start_pages(profile: dict, settings: dict) -> list[str]:
+    """Стартовые страницы профиля (по одной на строку), иначе общая из настроек."""
+    pages = [line.strip() for line in (profile.get("start_urls") or "").splitlines() if line.strip()]
+    pages = [page if "://" in page else f"https://{page}" for page in pages]
+    pages = [page for page in pages if page.startswith(("https://", "http://"))]
+    return pages or [settings["start_url"]]
+
+
+async def _adapt_to_hardware(cdp: CDP, profile: dict) -> list[str]:
+    """Сверяет отпечаток с настоящим монитором и видеокартой до того, как включены подмены."""
+    try:
+        info = await cdp.send("SystemInfo.getInfo", timeout=10)
+        devices = info.get("gpu", {}).get("devices", [])
+        real_gpu = " ".join(f"{d.get('vendorString', '')} {d.get('deviceString', '')}" for d in devices[:1])
+        targets = (await cdp.send("Target.getTargets"))["targetInfos"]
+        page = next(t for t in targets if t["type"] == "page")
+        attached = await cdp.send("Target.attachToTarget", {"targetId": page["targetId"], "flatten": True})
+        result = await cdp.send("Runtime.evaluate", {"expression": "[screen.width, screen.height]", "returnByValue": True}, attached["sessionId"])
+        await cdp.send("Target.detachFromTarget", {"sessionId": attached["sessionId"]})
+        real_screen = tuple(result["result"]["value"])
+    except (CDPError, StopIteration, KeyError, asyncio.TimeoutError):
+        return []
+    fp = json.loads(json.dumps(profile["fingerprint"]))
+    notes = fingerprint.adapt(fp, real_screen, real_gpu)
+    if notes:
+        profile["fingerprint"] = fp
+        with store.transaction() as profiles:
+            store.find(profiles, profile["id"])["fingerprint"] = fp
+        store.log_event(profile["id"], "Отпечаток подстроен: " + "; ".join(notes))
+    return notes
+
+
+async def _watch_ip(profile: dict, settings: dict, relay: Relay, session: "_Session", force: bool, log) -> None:
+    """Пока профиль открыт, следит за IP выхода. Если прокси увёл в другую страну,
+    задача завершается, и профиль закрывается."""
+    minutes = settings.get("ip_watch_minutes", 5)
+    if not minutes:
+        await asyncio.Event().wait()
+    current = (profile.get("geo") or {}).get("ip")
+    while True:
+        await asyncio.sleep(minutes * 60)
+        try:
+            found = await asyncio.to_thread(netcheck.check_ip, relay.url, settings)
+        except netcheck.CheckError:
+            store.log_event(profile["id"], "Прокси перестал отвечать во время работы")
+            continue
+        if current and found["ip"] == current:
+            continue
+        store.log_event(profile["id"], f"IP сменился во время работы: {current or 'неизвестен'} -> {found['ip']} ({found['city']}, {found['country']})")
+        log(f"Внимание: IP сменился во время работы: {current} -> {found['ip']}")
+        current = found["ip"]
+        with store.transaction() as profiles:
+            store.find(profiles, profile["id"])["geo"] = found
+        expected = settings.get("expected_country")
+        if expected and found["country"] and found["country"] != expected and not force:
+            store.log_event(profile["id"], f"Закрыт автоматически: IP оказался в {found['country']}")
+            log(f"Ошибка: IP оказался в {found['country']}, профиль закрыт")
+            return
+        if found.get("timezone"):
+            for page in list(session.pages):
+                try:
+                    await session.cdp.send("Emulation.setTimezoneOverride", {"timezoneId": found["timezone"]}, page)
+                except CDPError:
+                    pass
+
+
 async def _wait_for_devtools(port: int, process: subprocess.Popen, timeout: float = 30) -> str:
     deadline = time.monotonic() + timeout
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -386,17 +451,39 @@ async def _open(profile: dict, settings: dict, *, url, skip_check, force, headle
         process = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cdp = await CDP.connect(await _wait_for_devtools(port, process))
 
+        for note in await _adapt_to_hardware(cdp, profile):
+            log(f"Отпечаток подстроен: {note}")
+
         session = _Session(profile, settings)
         session.cdp = cdp
         cdp.on("Target.attachedToTarget", session.on_attached)
         await cdp.send("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True})
         tab = Tab(cdp, await asyncio.wait_for(session.first_page, 20))
 
-        target = url or settings["start_url"]
+        # Самопроверка на пустой странице: на сайт идём, только если подмены сработали.
+        report = preflight.summary(preflight.evaluate(await tab.evaluate(preflight.PROBE), profile, settings, resolve_timezone(profile)))
+        report["at"] = store.now_iso()
+        with store.transaction() as profiles:
+            store.find(profiles, profile_id)["preflight"] = report
+        for item in report["failed"]:
+            log(f"Самопроверка: {item['name']}: получено {item['got']}, ожидалось {item['want']}")
+        store.log_event(profile_id, f"Самопроверка: {report['passed']} из {report['total']}")
+        if report["blocked"] and not force:
+            raise LaunchError(
+                "Самопроверка не пройдена: " + ", ".join(item["name"] for item in report["failed"] if item["critical"])
+                + ". На сайт не пошёл (--force, чтобы открыть всё равно)"
+            )
+
+        targets = [url] if url else start_pages(profile, settings)
         try:
-            await tab.goto(target)
+            await tab.goto(targets[0])
         except (CDPError, asyncio.TimeoutError) as exc:
-            log(f"Страница {target} не открылась: {exc}")
+            log(f"Страница {targets[0]} не открылась: {exc}")
+        for extra in targets[1:]:
+            try:
+                await cdp.send("Target.createTarget", {"url": extra})
+            except CDPError:
+                pass
 
         with store.transaction() as profiles:
             store.find(profiles, profile_id)["last_opened"] = store.now_iso()
@@ -408,8 +495,15 @@ async def _open(profile: dict, settings: dict, *, url, skip_check, force, headle
             return
 
         stop_file = _stop_file(profile_id)
-        while process.poll() is None and not cdp.closed.is_set() and not stop_file.exists():
-            await asyncio.sleep(0.5)
+        watcher = asyncio.create_task(_watch_ip(profile, settings, relay, session, force, log)) if relay else None
+        try:
+            while process.poll() is None and not cdp.closed.is_set() and not stop_file.exists():
+                if watcher is not None and watcher.done():
+                    break  # сторож закрыл профиль: IP ушёл из нужной страны
+                await asyncio.sleep(0.5)
+        finally:
+            if watcher is not None:
+                watcher.cancel()
     finally:
         if process is not None:
             await _terminate(process, cdp)

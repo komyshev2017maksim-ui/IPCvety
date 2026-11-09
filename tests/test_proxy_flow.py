@@ -139,3 +139,32 @@ def test_check_reports_shared_exit_ip(proxy_port):
     assert result["errors"] == []
     assert any("A" in warning for warning in result["warnings"])
     assert "IP выхода 198.51.100.23" in store.duplicates(store.all_profiles())
+
+
+def test_ip_watch_closes_profile_when_exit_ip_leaves_the_country(monkeypatch):
+    import asyncio
+
+    with store.transaction() as profiles:
+        profile = store.new_profile(profiles, "W", proxy="127.0.0.1:1", proxy_city="Miami, FL")
+        profile["geo"] = {"ip": "198.51.100.23", "country": "US", "timezone": "America/New_York"}
+    answers = iter([
+        {"ip": "198.51.100.23", "country": "US", "city": "Miami", "timezone": "America/New_York"},
+        {"ip": "198.51.100.99", "country": "US", "city": "Tampa", "timezone": "America/New_York"},
+        {"ip": "203.0.113.5", "country": "KZ", "city": "Almaty", "timezone": "Asia/Almaty"},
+    ])
+    monkeypatch.setattr(launcher.netcheck, "check_ip", lambda url, settings: next(answers))
+
+    class FakeRelay:
+        url = "http://127.0.0.1:1"
+
+    class FakeSession:
+        pages = []
+
+    settings = {"ip_watch_minutes": 0.0003, "expected_country": "US"}
+    asyncio.run(asyncio.wait_for(
+        launcher._watch_ip(store.get("W"), settings, FakeRelay(), FakeSession(), False, lambda *_: None), 5))
+
+    texts = [event["text"] for event in store.events(store.get("W")["id"])]
+    assert any("198.51.100.23 -> 198.51.100.99" in text for text in texts), "смена IP внутри страны только записывается"
+    assert any("Закрыт автоматически: IP оказался в KZ" in text for text in texts)
+    assert store.get("W")["geo"]["ip"] == "203.0.113.5"

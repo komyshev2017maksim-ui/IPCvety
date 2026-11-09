@@ -149,7 +149,7 @@ def new_profile(profiles: list[dict], name: str, **fields) -> dict:
 
 EDITABLE = {
     "brand", "site", "instagram", "proxy_city", "timezone", "notes", "n",
-    "status", "group", "tags", "email", "phone", "phone_until", "steps",
+    "status", "group", "tags", "email", "phone", "phone_until", "steps", "start_urls", "proxy_rotate_url",
 }
 
 

@@ -11,6 +11,8 @@ import json
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -75,6 +77,7 @@ def state() -> dict:
         "statuses": brands.STATUSES,
         "steps": brands.STEPS,
         "test_pages": TEST_PAGES,
+        "fp_options": fingerprint.options(),
     }
 
 
@@ -93,6 +96,7 @@ def _closed(profile: dict) -> None:
 def _update(profile_id: str, body: dict) -> None:
     with store.transaction() as profiles:
         profile = _require(profiles, profile_id)
+        status_before = profile.get("status")
         if body.get("name") and body["name"].strip() != profile["name"]:
             store.rename(profiles, profile, body["name"])
         if "proxy" in body:
@@ -104,8 +108,14 @@ def _update(profile_id: str, body: dict) -> None:
             # Пустое поле пароля в форме значит «не менять».
             if body.get("proxy_pass"):
                 profile["proxy"]["password"] = body["proxy_pass"]
-        if "status" in body:
-            store.log_event(profile["id"], f"Статус: {dict(brands.STATUSES).get(body['status'], body['status'])}")
+        if isinstance(body.get("fingerprint"), dict):
+            edited = fingerprint.edit(profile["fingerprint"], body["fingerprint"])
+            if edited != profile["fingerprint"]:
+                _closed(profile)
+                profile["fingerprint"] = edited
+                store.log_event(profile["id"], "Отпечаток изменён вручную")
+        if profile.get("status") != status_before:
+            store.log_event(profile["id"], f"Статус: {dict(brands.STATUSES).get(profile['status'], profile['status'])}")
 
 
 def _open(profile_id: str, body: dict) -> None:
@@ -133,6 +143,22 @@ def _check(profile_id: str) -> dict:
     result = subprocess.run(command, **kwargs)
     output = (result.stdout + result.stderr).decode("utf-8", errors="replace").strip()
     return {"ok": result.returncode == 0, "output": output}
+
+
+def _rotate(profile_id: str) -> dict:
+    """Мобильные прокси: дёргает ссылку смены IP у провайдера и перепроверяет адрес."""
+    profile = store.get(profile_id)
+    link = (profile.get("proxy_rotate_url") or "").strip()
+    if not link.startswith(("https://", "http://")):
+        raise ApiError("В карточке не указана ссылка смены IP")
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener.open(link, timeout=30).read(2048)
+    except OSError as exc:
+        raise ApiError(f"Ссылка смены IP не ответила: {exc}") from exc
+    store.log_event(profile["id"], "Запрошена смена IP у провайдера")
+    time.sleep(3)
+    return _check(profile_id)
 
 
 def _trash(profile_id: str) -> None:
@@ -240,6 +266,8 @@ def handle_post(path: str, body) -> dict:
             launcher.request_stop(store.get(profile_id)["id"])
         elif action == "check":
             return _check(profile_id)
+        elif action == "rotate":
+            return _rotate(profile_id)
         elif action == "regen":
             _regen(profile_id)
         elif action == "trash":

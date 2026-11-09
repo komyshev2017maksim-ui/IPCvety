@@ -193,3 +193,60 @@ def test_problems_flags_wrong_country_and_shared_ip():
     assert any("сменился" in w for w in warnings)
     assert any("B" in w for w in warnings)
     assert any("America/Chicago" in w for w in warnings)
+
+
+# --- согласование с железом, ручная правка, самопроверка ----------------------------
+
+
+def test_adapt_grows_screen_to_real_monitor_and_matches_gpu_vendor():
+    fp = fingerprint.generate("win", seed=3)
+    fp["screen"].update(width=1366, height=768, availWidth=1366, availHeight=728)
+    fp["webgl"] = {"vendor": "Google Inc. (Intel)", "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)"}
+    notes = fingerprint.adapt(fp, (1920, 1080), "NVIDIA NVIDIA GeForce RTX 3070")
+    assert len(notes) == 2
+    assert (fp["screen"]["width"], fp["screen"]["height"], fp["screen"]["availHeight"]) == (1920, 1080, 1040)
+    assert "NVIDIA" in fp["webgl"]["renderer"]
+    assert fingerprint.adapt(fp, (1920, 1080), "NVIDIA GeForce") == [], "повторный запуск ничего не меняет"
+    assert fingerprint.adapt(fp, (1280, 720), "llvmpipe") == [], "меньший монитор и неизвестная карта не трогают отпечаток"
+    odd = fingerprint.generate("win", seed=4)
+    fingerprint.adapt(odd, (5120, 2880), None)
+    assert (odd["screen"]["width"], odd["screen"]["height"]) == (5120, 2880)
+
+
+def test_edit_fingerprint_validates_values():
+    fp = fingerprint.generate("win", seed=5)
+    gpu = fingerprint.options("win")["gpus"][3]
+    edited = fingerprint.edit(fp, {"screen": "2560x1440", "hardwareConcurrency": "16", "deviceMemory": "4", "gpu": gpu, "canvasNoise": False})
+    assert (edited["screen"]["width"], edited["hardwareConcurrency"], edited["deviceMemory"]) == (2560, 16, 4)
+    assert edited["webgl"]["renderer"] == gpu and edited["canvasNoise"] is False and edited["seed"] == fp["seed"]
+    assert fingerprint.edit(fp, {"gpu": ""})["webgl"] is None
+    same = {"screen": f"{fp['screen']['width']}x{fp['screen']['height']}", "gpu": fp["webgl"]["renderer"],
+            "hardwareConcurrency": str(fp["hardwareConcurrency"]), "canvasNoise": True, "audioNoise": True}
+    assert fingerprint.edit(fp, same) == fp
+    for bad in ({"screen": "1x1"}, {"hardwareConcurrency": "3"}, {"gpu": "Voodoo 3"}):
+        with pytest.raises(ValueError):
+            fingerprint.edit(fp, bad)
+
+
+def test_preflight_blocks_on_real_mismatch_only():
+    from antidetect import preflight
+
+    fp = fingerprint.generate("win", seed=6)
+    profile = {"fingerprint": fp}
+    settings = {"locale": "en-US"}
+    good = {"webdriver": False, "cores": fp["hardwareConcurrency"], "timezone": "America/Chicago", "language": "en-US",
+            "locale": "en-US", "screen": [fp["screen"]["width"], fp["screen"]["height"]], "outer": [1200, 700],
+            "renderer": fp["webgl"]["renderer"], "native": True,
+            "worker": {"cores": fp["hardwareConcurrency"], "timezone": "America/Chicago", "language": "en-US",
+                       "renderer": fp["webgl"]["renderer"]}}
+    report = preflight.summary(preflight.evaluate(good, profile, settings, "America/Chicago"))
+    assert report["failed"] == [] and not report["blocked"] and report["total"] >= 9
+
+    leaking = {**good, "timezone": "Asia/Almaty", "worker": {**good["worker"], "cores": 4}}
+    report = preflight.summary(preflight.evaluate(leaking, profile, settings, "America/Chicago"))
+    assert report["blocked"]
+    assert {item["name"] for item in report["failed"]} == {"Часовой пояс", "Воркер видит то же устройство"}
+
+    no_worker = {**good, "worker": None, "native": False}
+    report = preflight.summary(preflight.evaluate(no_worker, profile, settings, "America/Chicago"))
+    assert len(report["failed"]) == 2 and not report["blocked"], "некритичные проверки запуск не останавливают"
