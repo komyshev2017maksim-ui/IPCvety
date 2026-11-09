@@ -1,0 +1,9 @@
+# Данные профилей: cookies, сессии, пароли прокси. В репозиторий не попадают.
+/data/
+instagram-profiles.json
+settings.json
+
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/

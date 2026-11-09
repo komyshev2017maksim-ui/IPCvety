@@ -1,0 +1,22 @@
+[
+  {
+    "n": 1,
+    "brand": "Captain Tom's Boat Removal",
+    "site": "ct-boatremoval.com",
+    "profile_name": "IG-01",
+    "proxy": "203.0.113.10:8000",
+    "proxy_city": "Miami, FL",
+    "timezone": "",
+    "instagram": ""
+  },
+  {
+    "n": 2,
+    "brand": "NauticalHaul",
+    "site": "nauticalhaul.com",
+    "profile_name": "IG-02",
+    "proxy": "",
+    "proxy_city": "Houston, TX",
+    "timezone": "",
+    "instagram": ""
+  }
+]

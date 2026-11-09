@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Профили</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --ink: #1c1d1f; --muted: #6b6f76; --line: #e2e0d9;
+    --accent: #1f6f5c; --accent-ink: #ffffff; --warn-bg: #fdf1d6; --warn-ink: #6d4a00;
+    --bad: #b3261e; --ok: #1f6f5c; --chip: #eeece5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a; --panel: #1f2123; --ink: #e9e8e4; --muted: #9a9ea6; --line: #303236;
+      --accent: #58b79f; --accent-ink: #0d1f1a; --warn-bg: #3a2e12; --warn-ink: #f1d48a;
+      --bad: #f2867f; --ok: #58b79f; --chip: #2a2c2f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 18px 24px 10px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; }
+  #summary { color: var(--muted); margin-right: auto; }
+  button, .button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    padding: 6px 11px; border-radius: 7px; cursor: pointer; white-space: nowrap; }
+  button:hover { border-color: var(--muted); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  button.danger { color: var(--bad); }
+  input[type=search] { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--panel); color: var(--ink); width: 200px; }
+  main { padding: 0 24px 40px; }
+  #warnings { background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 10px 14px; margin: 6px 0 12px; }
+  #warnings:empty { display: none; }
+  #warnings div + div { margin-top: 4px; }
+  .wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  table { border-collapse: collapse; width: 100%; min-width: 1120px; }
+  th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  .name { font-weight: 650; }
+  .sub { color: var(--muted); font-size: 12.5px; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 20px; padding: 1px 9px; font-size: 12px; }
+  .chip.on { background: var(--accent); color: var(--accent-ink); }
+  .chip.bad { color: var(--bad); }
+  .actions { display: flex; gap: 6px; }
+  .nowrap { white-space: nowrap; }
+  .log { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; margin-top: 6px; max-width: 300px; }
+  .log.bad { color: var(--bad); }
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); padding: 22px; width: min(520px, 92vw); }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h2 { margin: 0 0 14px; font-size: 17px; }
+  label { display: block; margin-bottom: 10px; font-size: 12.5px; color: var(--muted); }
+  label input, label textarea { display: block; width: 100%; margin-top: 3px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+  .dialog-actions .left { margin-right: auto; display: flex; gap: 8px; }
+  #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
+    padding: 9px 16px; border-radius: 8px; max-width: 80vw; white-space: pre-wrap; display: none; }
+  footer { color: var(--muted); font-size: 12px; padding: 12px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Профили</h1>
+  <span id="summary"></span>
+  <input type="search" id="filter" placeholder="Поиск по бренду или профилю">
+  <button id="import-button">Импорт JSON</button>
+  <input type="file" id="import-file" accept=".json,application/json" hidden>
+  <button class="primary" id="new-button">Новый профиль</button>
+</header>
+<main>
+  <div id="warnings"></div>
+  <div class="wrap">
+    <table>
+      <thead><tr>
+        <th>Профиль</th><th>Прокси</th><th>Где выходит</th><th>Отпечаток</th><th>Последний вход</th><th>Действия</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>Профилей пока нет. Нажмите «Импорт JSON» и выберите instagram-profiles.json из панели учёта, либо создайте профиль вручную.</div>
+  </div>
+  <footer id="footer"></footer>
+</main>
+
+<dialog id="editor">
+  <form method="dialog" id="editor-form">
+    <h2 id="editor-title"></h2>
+    <div class="row">
+      <label>Название профиля<input name="name" required></label>
+      <label>Бренд<input name="brand"></label>
+    </div>
+    <div class="row">
+      <label>Сайт<input name="site"></label>
+      <label>Логин Instagram<input name="instagram"></label>
+    </div>
+    <label>Прокси (host:port, можно с http:// или socks5://)<input name="proxy" class="mono" placeholder="203.0.113.10:8000"></label>
+    <div class="row">
+      <label>Логин прокси<input name="proxy_user" autocomplete="off"></label>
+      <label>Пароль прокси<input name="proxy_pass" type="password" autocomplete="new-password"></label>
+    </div>
+    <div class="row">
+      <label>Город и штат прокси<input name="proxy_city" placeholder="Miami, FL"></label>
+      <label>Часовой пояс вручную<input name="timezone" placeholder="определится по IP"></label>
+    </div>
+    <label>Заметки<textarea name="notes" rows="2"></textarea></label>
+    <div class="dialog-actions">
+      <span class="left">
+        <button type="button" class="danger" id="delete-button">Удалить</button>
+        <button type="button" id="regen-button">Новый отпечаток</button>
+      </span>
+      <button type="button" id="cancel-button">Отмена</button>
+      <button type="submit" class="primary">Сохранить</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast"></div>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+let state = { profiles: [], duplicates: {} };
+let editingId = null;
+const busy = new Set();
+
+async function api(path, body) {
+  const options = body === undefined ? {} : {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Antidetect': '1' },
+    body: JSON.stringify(body),
+  };
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Ошибка ' + response.status);
+  return data;
+}
+
+let toastTimer;
+function toast(text, ms = 5000) {
+  const node = $('toast');
+  node.textContent = text;
+  node.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { node.style.display = 'none'; }, ms);
+}
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === 'class') node.className = value;
+    else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
+    else if (value !== false && value != null) node.setAttribute(key, value === true ? '' : value);
+  }
+  for (const child of children) if (child != null) node.append(child);
+  return node;
+}
+
+function shortGpu(renderer) {
+  const match = /ANGLE \([^,]+, (.+?)(?: Direct3D| \(|, )/.exec(renderer || '');
+  return match ? match[1].replace(/\(R\)|\(TM\)/g, '').trim() : (renderer || '');
+}
+
+async function act(profile, action, body = {}) {
+  busy.add(profile.id);
+  render();
+  try {
+    const result = await api(`/api/profiles/${profile.id}/${action}`, body);
+    if (action === 'check') toast(result.output || 'Готово', 9000);
+    if (action === 'open') toast(`${profile.name}: проверяю прокси и открываю браузер`);
+  } catch (error) {
+    toast(error.message, 9000);
+  }
+  busy.delete(profile.id);
+  await refresh();
+}
+
+function row(profile) {
+  const proxy = profile.proxy;
+  const geo = profile.geo;
+  const fp = profile.fingerprint;
+  const isBusy = busy.has(profile.id);
+  const wrongCountry = geo && state.expected_country && geo.country && geo.country !== state.expected_country;
+  const failed = !profile.running && /Ошибка|ОШИБКА|Traceback/.test(profile.log || '');
+
+  const openButton = profile.running
+    ? el('button', { disabled: isBusy, onclick: () => act(profile, 'stop') }, 'Закрыть')
+    : el('button', { class: 'primary', disabled: isBusy, onclick: () => act(profile, 'open') }, 'Открыть');
+
+  return el('tr', {},
+    el('td', {},
+      el('div', { class: 'name' }, profile.name, ' ', profile.running ? el('span', { class: 'chip on' }, 'открыт') : null),
+      el('div', { class: 'sub' }, [profile.brand, profile.site].filter(Boolean).join(' · ')),
+      profile.instagram ? el('div', { class: 'sub' }, '@' + profile.instagram.replace(/^@/, '')) : null,
+    ),
+    el('td', {},
+      proxy
+        ? el('div', { class: 'mono' }, `${proxy.scheme}://${proxy.host}:${proxy.port}`)
+        : el('span', { class: 'chip bad' }, 'не задан'),
+      proxy ? el('div', { class: 'sub' }, proxy.username ? (proxy.has_password ? 'логин и пароль' : 'логин без пароля') : 'без авторизации') : null,
+    ),
+    el('td', {},
+      geo
+        ? el('div', {}, el('span', { class: 'mono' }, geo.ip), wrongCountry ? el('span', { class: 'chip bad' }, geo.country) : null)
+        : el('span', { class: 'sub' }, 'IP не проверен'),
+      el('div', { class: 'sub' }, geo && geo.city ? `${geo.city}, ${geo.region}` : (profile.proxy_city || '')),
+      el('div', { class: 'sub' }, profile.effective_timezone || 'пояс неизвестен'),
+    ),
+    el('td', {},
+      el('div', { class: 'nowrap' }, `${fp.screen.width}×${fp.screen.height}, ${fp.hardwareConcurrency} ядер`),
+      el('div', { class: 'sub' }, shortGpu(fp.webgl && fp.webgl.renderer)),
+    ),
+    el('td', {},
+      el('div', {}, profile.last_opened ? new Date(profile.last_opened).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }) : 'не открывался'),
+      (failed || profile.running) && profile.log ? el('div', { class: 'log' + (failed ? ' bad' : '') }, profile.log) : null,
+    ),
+    el('td', {},
+      el('div', { class: 'actions' },
+        openButton,
+        el('button', { disabled: isBusy || !proxy, onclick: () => act(profile, 'check') }, isBusy ? 'Жду…' : 'Проверить IP'),
+        el('button', { onclick: () => openEditor(profile) }, 'Изменить'),
+      ),
+    ),
+  );
+}
+
+function render() {
+  const query = $('filter').value.trim().toLowerCase();
+  const shown = state.profiles.filter((p) =>
+    !query || [p.name, p.brand, p.site, p.instagram].some((v) => (v || '').toLowerCase().includes(query)));
+  $('rows').replaceChildren(...shown.map(row));
+  $('empty').hidden = state.profiles.length > 0;
+  const running = state.profiles.filter((p) => p.running).length;
+  const noProxy = state.profiles.filter((p) => !p.proxy).length;
+  $('summary').textContent = state.profiles.length
+    ? `${state.profiles.length} всего, открыто ${running}, без прокси ${noProxy}`
+    : '';
+  $('warnings').replaceChildren(...Object.entries(state.duplicates).map(([what, names]) =>
+    el('div', {}, `Повтор: ${what} у профилей ${names.join(', ')}`)));
+  $('footer').textContent = state.home ? `Данные лежат в ${state.home}` : '';
+}
+
+async function refresh() {
+  try {
+    state = await api('/api/state');
+    render();
+  } catch (error) { /* сервер остановлен: оставляем последнее состояние */ }
+}
+
+function openEditor(profile) {
+  editingId = profile ? profile.id : null;
+  const formNode = $('editor-form');
+  formNode.reset();
+  const form = formNode.elements;
+  $('editor-title').textContent = profile ? `Профиль ${profile.name}` : 'Новый профиль';
+  form.name.disabled = Boolean(profile);
+  $('delete-button').hidden = $('regen-button').hidden = !profile;
+  if (profile) {
+    form.name.value = profile.name;
+    for (const key of ['brand', 'site', 'instagram', 'proxy_city', 'timezone', 'notes']) form[key].value = profile[key] || '';
+    if (profile.proxy) {
+      const p = profile.proxy;
+      form.proxy.value = (p.scheme === 'http' ? '' : p.scheme + '://') + `${p.host}:${p.port}`;
+      form.proxy_user.value = p.username || '';
+      form.proxy_pass.placeholder = p.has_password ? 'сохранён, оставьте пустым' : '';
+    }
+  }
+  $('editor').showModal();
+}
+
+$('editor-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.target.elements;
+  const body = {};
+  for (const key of ['name', 'brand', 'site', 'instagram', 'proxy', 'proxy_user', 'proxy_pass', 'proxy_city', 'timezone', 'notes']) {
+    body[key] = form[key].value.trim();
+  }
+  try {
+    await api(editingId ? `/api/profiles/${editingId}` : '/api/profiles', body);
+    $('editor').close();
+  } catch (error) {
+    toast(error.message, 9000);
+  }
+  refresh();
+});
+$('cancel-button').addEventListener('click', () => $('editor').close());
+$('delete-button').addEventListener('click', async () => {
+  const profile = state.profiles.find((p) => p.id === editingId);
+  if (!confirm(`Удалить профиль ${profile.name} вместе с cookies и сессиями? Вернуть будет нельзя.`)) return;
+  try { await api(`/api/profiles/${editingId}/delete`, {}); $('editor').close(); } catch (error) { toast(error.message); }
+  refresh();
+});
+$('regen-button').addEventListener('click', async () => {
+  const profile = state.profiles.find((p) => p.id === editingId);
+  if (!confirm(`Сайты увидят ${profile.name} как новое устройство. Сменить отпечаток?`)) return;
+  try { await api(`/api/profiles/${editingId}/regen`, {}); toast('Отпечаток сменён'); } catch (error) { toast(error.message); }
+  refresh();
+});
+$('new-button').addEventListener('click', () => openEditor(null));
+$('filter').addEventListener('input', render);
+$('import-button').addEventListener('click', () => $('import-file').click());
+$('import-file').addEventListener('change', async (event) => {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  try {
+    const result = await api('/api/import', JSON.parse(await file.text()));
+    toast(`Создано ${result.created.length}, обновлено ${result.updated.length}, без изменений ${result.unchanged.length}`);
+  } catch (error) {
+    toast('Импорт не удался: ' + error.message, 9000);
+  }
+  refresh();
+});
+
+refresh();
+setInterval(() => { if (!$('editor').open) refresh(); }, 2500);
+</script>
+</body>
+</html>
